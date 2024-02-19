@@ -1,5 +1,5 @@
 #csv_sql2
-#Convert csv file to MySQL Database
+#Converts csv file to MySQL table
 import pandas as pd
 import mysql.connector
 
