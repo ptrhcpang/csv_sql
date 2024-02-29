@@ -1,45 +1,67 @@
 #csv_sql2
 #Converts csv file to MySQL table
-import pandas as pd
+import csv
 import mysql.connector
 
 #This class TransferObj takes in a csv file and  
 #MySQL login details, and allows users either to 
 #create a (database and a) table from the csv 
 #or insert the csv data into an extant table.
-#This is done via reading a csv file in as a 
-#pandas dataframe. The only data types permitted 
+#This is done via reading a csv file using csv. 
+#The only data types permitted 
 #to be written into a MySQL table so far are 
 #INTs, FLOATs, BOOLs, and VARCHARs (255).
 #Standard mysql.connector functions are unimpeded
 #and can be accessed directly via 
 # >>> TransferObj1.mc.execute(sql_command)
-#Future work: 1.allow user to specify n,m in 
-#               FLOAT(n,m) type variables
+#Future work: 1.allow DATETIME variables
 #             2.easy UPDATEs
 #             3.MySQL style table output in Python
 
 
 class TransferObj:
-    def __init__(self,csv_filepath,host,user,password):
-        self.csv_fp = csv_filepath;
+    def __init__(self,csv_filepath,host,user,password,coln,delimiter=',',header_incl=True):
+        #self.csv_fp = csv_filepath;
         #self.host = host;
         #self.user = user;
         #self.password = password;
         self.database = None;
+        self.header = header_incl;
         self.mydb = mysql.connector.connect(
             host = host,
             user = user,
             password = password
         )
         self.mc = self.mydb.cursor()
-        self.df = pd.read_csv(csv_filepath)
-        self.rown,self.coln = self.df.shape[:]
+        self.df = []
+        with open(csv_filepath,newline='\n') as csvf:
+            f = csv.reader(csvf,delimiter=delimiter)
+            for row in f:
+                self.df.append(row)
+        self.df = self.__trim__()
+        for r in self.df:
+            flag = 0
+            if len(r)!=coln and len(r)>0:
+                print(f'warning: row {self.df.index(r)} has length {len(r)} but expected number of columns is  {coln}')
+                flag = 1
+            if flag == 1:
+                self.mc.close()
+                print('not all non-empty rows are of the same length, MySQL connection not established')
+        self.coln = coln;
+        self.rown = len(self.df)
         self.INTind = []  #column index of integers
         self.FLOATind = [] #column index of floats
         self.BOOLind = [] #column index of booleans
         self.Vals = [] #list of values to be written
     
+    
+    #trim all empty rows
+    def __trim__(self):
+        R = []
+        for row in self.df:
+            if len(row)>0:
+                R.append(row)
+        return R
     
     
     #specify database
@@ -97,8 +119,6 @@ class TransferObj:
     
     #cast csv entries to correct types,     
     def __toVALUES__(self):
-        #list of column headings
-        columns = list(self.df.columns)
         #builds MySQL values tuple, converts 'nan' to None
         #other quantities' type conversions to be customised
         self.__toSTR__() #finalise which are ints, floats, and booleans
@@ -106,20 +126,20 @@ class TransferObj:
         for x in range(self.rown):
             a = [];
             for y in range(self.coln):
-                t = str(self.df.loc[x][y]);
+                t = str(self.df[x][y]);
                 if t == 'nan':
                     a.append(None)
                     continue
                 if y in self.FLOATind:
-                    a.append(float(self.df.loc[x][y]))
+                    a.append(float(self.df[x][y]))
                     continue
                 if y in self.INTind:
-                    a.append(int(float(self.df.loc[x][y])))
+                    a.append(int(float(self.df[x][y])))
                     continue
                 if y in self.BOOLind:
-                    if self.df.loc[x][y] in ['False','FALSE','0']:
-                        self.df.loc[x][y] = False
-                    a.append(bool(self.df.loc[x][y]))
+                    if self.df[x][y] in ['False','FALSE','0']:
+                        self.df[x][y] = False
+                    a.append(bool(self.df[x][y]))
                     continue                
                 a.append(t)
             self.Vals.append(tuple(a))
@@ -135,13 +155,22 @@ class TransferObj:
         return True
     
     #create a new table with the csv column headings if needed
-    def createtable(self,table):
-        #make sure we are in a certain database first
+    def createtable(self,table,header=[]):
+        #list of column headings
         if self.database == None:
             print("no database selected")
-            return 0
+            return 0 
+        if self.header == True:
+            columns = list(self.df[0])
+        else:
+            if len(header) == self.coln:
+                columns = header
+            else:
+                columns = []
+                for r in range(self.coln):
+                    columns.append('Column'+str(r))
+        #make sure we are in a certain database first
         sql = 'CREATE TABLE '+ table + '('
-        columns = list(self.df.columns)
         for x in range(self.coln):
             if x in self.FLOATind:
                 sql = sql + columns[x] + ' FLOAT, '
@@ -161,12 +190,7 @@ class TransferObj:
         
     #insert csv file into an existing table
     def insertinto(self,table):
-        self.mc.execute('SHOW TABLES;')
-        AvailableTabs = []
-        for x in self.showmc():
-            AvailableTabs.append(x[0])
-        if table not in AvailableTabs:
-            print('Table not available.')
+        if not self.__checkdbtb__():
             return 0
         sql = 'INSERT INTO ' + table + ' ('
         sqlv = ') VALUES('
@@ -187,6 +211,31 @@ class TransferObj:
             self.mc.executemany(sql,self.Vals)
             a = self.showmc()
             self.mydb.commit()
+        if self.header == True:
+            self.mc.execute('delete from '+table+ f' where {self.df[0][0]} = \'{self.df[0][0]}\'')
+            self.mydb.commit()
         return 'csv inserted'
-
-###
+    
+    #make an auto-incrementing primary key index
+    def makeindex(self,table):
+        if not self.__checkdbtb__():
+            return 0
+        sql = 'ALTER TABLE ' + table + ' ADD COLUMN Id INT;'
+        self.mc.execute(sql)
+        sql = 'ALTER TABLE ' + table + ' CHANGE Id Id INT KEY AUTO_INCREMENT;'       
+        self.mc.execute(sql)
+        return 'index created'
+    
+    #checks that there is a database selected and that the table selected exists
+    def __checkdbtb__(table):
+        if self.database == None:
+            print("no database selected")
+            return False
+        self.mc.execute('SHOW TABLES;')
+        AvailableTabs = []
+        for x in self.showmc():
+            AvailableTabs.append(x[0])
+        if table not in AvailableTabs:
+            print('Table not available.')
+            return False
+        return True
